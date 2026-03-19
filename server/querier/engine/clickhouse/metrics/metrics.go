@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	simplejson "github.com/bitly/go-simplejson"
 	"github.com/deepflowio/deepflow/server/querier/common"
 	"github.com/deepflowio/deepflow/server/querier/config"
 	ckcommon "github.com/deepflowio/deepflow/server/querier/engine/clickhouse/common"
@@ -116,7 +117,7 @@ func NewReplaceMetrics(dbField string, condition string) *Metrics {
 	}
 }
 
-func GetAggMetrics(field, db, table, orgID string, nativeField map[string]*Metrics) (*Metrics, bool) {
+func GetAggMetrics(field, db, table, orgID string, nativeField map[string]*Metrics, customMetrics map[string]*simplejson.Json) (*Metrics, bool) {
 	field = strings.Trim(field, "`")
 	if field == COUNT_METRICS_NAME {
 		return &Metrics{
@@ -129,7 +130,7 @@ func GetAggMetrics(field, db, table, orgID string, nativeField map[string]*Metri
 			Table:       table,
 		}, true
 	}
-	return GetMetrics(field, db, table, orgID, nativeField)
+	return GetMetrics(field, db, table, orgID, nativeField, customMetrics)
 }
 
 func GetTagTypeMetrics(tagDescriptions *common.Result, newAllMetrics map[string]*Metrics, db, table, orgID string) error {
@@ -225,7 +226,7 @@ func GetTagTypeMetrics(tagDescriptions *common.Result, newAllMetrics map[string]
 	return nil
 }
 
-func GetMetrics(field, db, table, orgID string, nativeField map[string]*Metrics) (*Metrics, bool) {
+func GetMetrics(field, db, table, orgID string, nativeField map[string]*Metrics, customMetrics map[string]*simplejson.Json) (*Metrics, bool) {
 	newAllMetrics := map[string]*Metrics{}
 	field = strings.Trim(field, "`")
 	// flow_tag database has no metrics
@@ -241,17 +242,38 @@ func GetMetrics(field, db, table, orgID string, nativeField map[string]*Metrics)
 		)
 		return metric, true
 	}
+
 	// dynamic metrics
-	if slices.Contains([]string{ckcommon.DB_NAME_DEEPFLOW_ADMIN, ckcommon.DB_NAME_DEEPFLOW_TENANT, ckcommon.DB_NAME_APPLICATION_LOG, ckcommon.DB_NAME_EXT_METRICS}, db) || slices.Contains([]string{ckcommon.TABLE_NAME_L7_FLOW_LOG, ckcommon.TABLE_NAME_EVENT, ckcommon.TABLE_NAME_FILE_EVENT}, table) {
+	if slices.Contains([]string{ckcommon.DB_NAME_DEEPFLOW_ADMIN, ckcommon.DB_NAME_DEEPFLOW_TENANT, ckcommon.DB_NAME_APPLICATION_LOG, ckcommon.DB_NAME_EXT_METRICS}, db) || slices.Contains([]string{ckcommon.TABLE_NAME_L7_FLOW_LOG}, table) {
 		fieldSplit := strings.Split(field, ".")
 		if len(fieldSplit) > 1 {
 			if fieldSplit[0] == "metrics" {
 				fieldName := strings.Replace(field, "metrics.", "", 1)
+				var mUnit, description string
+				displayName := field
+				mType := METRICS_TYPE_COUNTER
+				if customMetrics == nil && config.ControllerCfg.DFWebService.Enabled {
+					var fetchErr error
+					customMetrics, fetchErr = ckcommon.GetCustomMetrics(orgID)
+					if fetchErr != nil {
+						log.Error(fetchErr.Error())
+						customMetrics = map[string]*simplejson.Json{}
+					}
+				}
+				if customMetrics != nil {
+					customMetric, ok := customMetrics[fmt.Sprintf("%s.%s.%s", db, table, field)]
+					if ok {
+						mType = customMetric.Get("TYPE").MustInt()
+						mUnit = customMetric.Get("UNIT").MustString()
+						displayName = customMetric.Get("DISPLAY_NAME").MustString()
+						description = customMetric.Get("DESCRIPTION").MustString()
+					}
+				}
 				metrics_names_field, metrics_values_field := METRICS_ARRAY_NAME_MAP[db][0], METRICS_ARRAY_NAME_MAP[db][1]
 				metric := NewMetrics(
 					0, fmt.Sprintf("if(indexOf(%s, '%s')=0,null,%s[indexOf(%s, '%s')])", metrics_names_field, fieldName, metrics_values_field, metrics_names_field, fieldName),
-					field, field, field, "", "", "", METRICS_TYPE_COUNTER,
-					ckcommon.NATIVE_FIELD_CATEGORY_METRICS, []bool{true, true, true}, "", table, "", "", "", "", "",
+					displayName, displayName, displayName, mUnit, mUnit, mUnit, mType,
+					ckcommon.NATIVE_FIELD_CATEGORY_METRICS, []bool{true, true, true}, "", table, description, description, description, "", "",
 				)
 				return metric, true
 			} else if fieldSplit[0] == "tag" {
@@ -273,7 +295,7 @@ func GetMetrics(field, db, table, orgID string, nativeField map[string]*Metrics)
 			}
 		}
 	}
-	allMetrics := GetMetricsByDBTableStatic(db, table)
+	allMetrics := GetMetricsByDBTableStatic(db, table, customMetrics)
 	// deep copy map
 	for k, v := range allMetrics {
 		newAllMetrics[k] = v
@@ -316,7 +338,7 @@ func GetMetrics(field, db, table, orgID string, nativeField map[string]*Metrics)
 	}
 }
 
-func GetMetricsByDBTableStatic(db string, table string) map[string]*Metrics {
+func GetMetricsByDBTableStatic(db string, table string, customMetrics map[string]*simplejson.Json) map[string]*Metrics {
 	switch db {
 	case "flow_log":
 		switch table {
@@ -364,6 +386,29 @@ func GetMetricsByDBTableStatic(db string, table string) map[string]*Metrics {
 			return GetLogMetrics()
 		}
 	case ckcommon.DB_NAME_PROMETHEUS:
+		originalMetrics := GetSamplesMetrics()
+		for field, metric := range originalMetrics {
+			if customMetrics != nil {
+				customMetric, ok := customMetrics[fmt.Sprintf("%s.%s.%s", db, table, field)]
+				if ok {
+					mType := customMetric.Get("TYPE").MustInt()
+					mUnit := customMetric.Get("UNIT").MustString()
+					displayName := customMetric.Get("DISPLAY_NAME").MustString()
+					description := customMetric.Get("DESCRIPTION").MustString()
+					metric.DisplayName = displayName
+					metric.DescriptionEN = displayName
+					metric.DescriptionZH = displayName
+					metric.Unit = mUnit
+					metric.UnitEN = mUnit
+					metric.UnitZH = mUnit
+					metric.Type = mType
+					metric.Description = description
+					metric.DisplayNameZH = displayName
+					metric.DisplayNameEN = displayName
+				}
+			}
+		}
+
 		return GetSamplesMetrics()
 	}
 	return map[string]*Metrics{}
@@ -389,11 +434,11 @@ func GetMetricsDescriptionsByDBTable(db, table string, allMetrics map[string]*Me
 	return values
 }
 
-func FormatMetricsToResult(db, table, where, queryCacheTTL, orgID string, useQueryCache bool, ctx context.Context) (map[string]*Metrics, []interface{}, error) {
+func FormatMetricsToResult(db, table, where, queryCacheTTL, orgID string, useQueryCache bool, ctx context.Context, customMetrics map[string]*simplejson.Json) (map[string]*Metrics, []interface{}, error) {
 	allMetrics := map[string]*Metrics{}
 	values := []interface{}{}
 	// static
-	staticMetrics := GetMetricsByDBTableStatic(db, table)
+	staticMetrics := GetMetricsByDBTableStatic(db, table, customMetrics)
 	for metricName, staticMetric := range staticMetrics {
 		allMetrics[metricName] = staticMetric
 	}
@@ -412,7 +457,7 @@ func FormatMetricsToResult(db, table, where, queryCacheTTL, orgID string, useQue
 	return allMetrics, values, nil
 }
 
-func GetMetricsDescriptions(db, table, where, queryCacheTTL, orgID string, useQueryCache bool, ctx context.Context) (*common.Result, error) {
+func GetMetricsDescriptions(db, table, where, queryCacheTTL, orgID string, useQueryCache bool, ctx context.Context, customMetrics map[string]*simplejson.Json) (*common.Result, error) {
 	var values []interface{}
 	// show metrics on db
 	if table == "" {
@@ -432,14 +477,14 @@ func GetMetricsDescriptions(db, table, where, queryCacheTTL, orgID string, useQu
 		}
 		for _, dbTable := range tables {
 			tb := dbTable.(string)
-			_, metricValues, err := FormatMetricsToResult(db, tb, where, queryCacheTTL, orgID, useQueryCache, ctx)
+			_, metricValues, err := FormatMetricsToResult(db, tb, where, queryCacheTTL, orgID, useQueryCache, ctx, customMetrics)
 			if err != nil {
 				return nil, err
 			}
 			values = append(values, metricValues...)
 		}
 	} else {
-		_, metricValues, err := FormatMetricsToResult(db, table, where, queryCacheTTL, orgID, useQueryCache, ctx)
+		_, metricValues, err := FormatMetricsToResult(db, table, where, queryCacheTTL, orgID, useQueryCache, ctx, customMetrics)
 		if err != nil {
 			return nil, err
 		}
