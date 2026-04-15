@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+use core::convert::Into;
 use std::{
     boxed::Box,
     cell::RefCell,
@@ -53,6 +54,7 @@ use super::{
 };
 
 use crate::{
+    collector::types::MiniFlow,
     common::{
         ebpf::EbpfType,
         endpoint::{EndpointData, EndpointDataPov, EndpointInfo, EPC_DEEPFLOW, EPC_INTERNET},
@@ -1651,13 +1653,16 @@ impl FlowMap {
         consistent_timestamp_in_l7_metrics: bool,
         time_in_micros: u64,
     ) {
-        let flow = &mut node.tagged_flow.flow;
-        let Some(mut perf_stats) = flow.flow_perf_stats.take() else {
+        if node.tagged_flow.flow.flow_perf_stats.is_none() {
             return;
-        };
-        perf_stats.l7.sequential_merge(&l7_stat);
-        flow.flow_perf_stats = Some(perf_stats);
+        }
+        node.tagged_flow
+            .flow
+            .flow_perf_stats
+            .as_mut()
+            .map(|perf_stats| perf_stats.l7.sequential_merge(&l7_stat));
 
+        let flow = &node.tagged_flow.flow;
         let app_proto_head = l7_info.app_proto_head().unwrap();
         let time_span = if consistent_timestamp_in_l7_metrics
             && app_proto_head.msg_type == LogMessageType::Response
@@ -1679,7 +1684,7 @@ impl FlowMap {
         l7_stats.l7_protocol = l7_protocol;
         l7_stats.time_span = time_span as u32;
         l7_stats.biz_type = l7_info.get_biz_type();
-        l7_stats.flow = None;
+        l7_stats.mini_flow = MiniFlow::from(flow);
 
         self.l7_stats_output
             .send(self.l7_stats_allocator.allocate_one_with(l7_stats));
@@ -2050,7 +2055,7 @@ impl FlowMap {
                     signal_source: flow.signal_source,
                     time_in_second: self.start_time,
                     l7_protocol: flow_perf.l7_protocol,
-                    flow: Some(tagged_flow.clone()),
+                    mini_flow: MiniFlow::from(flow),
                     is_reversed: false,
                     ..Default::default()
                 };
@@ -2070,7 +2075,7 @@ impl FlowMap {
                     signal_source: flow.signal_source,
                     time_in_second: self.start_time,
                     l7_protocol: flow_perf.l7_protocol,
-                    flow: Some(tagged_flow.clone()),
+                    mini_flow: MiniFlow::from(flow),
                     is_reversed: true,
                     ..Default::default()
                 };
