@@ -31,6 +31,10 @@ const (
 )
 
 const (
+	DEFAULT_IGNORE_NIC_REGEX = "^(kube-ipvs)"
+)
+
+const (
 	CONFIG_DB_MYSQL = "mysql"
 	CONFIG_DB_REDIS = "redis"
 )
